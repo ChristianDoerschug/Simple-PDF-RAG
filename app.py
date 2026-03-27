@@ -307,7 +307,25 @@ def format_sources(docs):
     return result
 
 
+def infer_response_language(text: str) -> str:
+    lower = f" {text.lower()} "
+    german_markers = [" der ", " die ", " und ", " ist ",
+                      " nicht ", " ich ", " bitte ", "frage", "dokument"]
+    english_markers = [" the ", " and ", " is ", " not ",
+                       " please ", "question", "document", "what", "how", "can you"]
+
+    german_score = sum(1 for token in german_markers if token in lower)
+    english_score = sum(1 for token in english_markers if token in lower)
+
+    if german_score > english_score:
+        return "de"
+    return "en"
+
+
 def run_rag_pipeline(user_question: str, groq_api_key: str, debug_mode: bool = False):
+    response_lang = infer_response_language(user_question)
+    response_language_name = "German" if response_lang == "de" else "English"
+
     try:
         docs = st.session_state.vector_store.similarity_search(
             user_question,
@@ -318,7 +336,9 @@ def run_rag_pipeline(user_question: str, groq_api_key: str, debug_mode: bool = F
         return None, []
 
     if not docs:
-        return "Keine relevanten Textstellen gefunden.", []
+        if response_lang == "de":
+            return "Keine relevanten Textstellen gefunden.", []
+        return "No relevant text passages found.", []
 
     llm = get_llm_model(
         groq_api_key,
@@ -338,9 +358,10 @@ def run_rag_pipeline(user_question: str, groq_api_key: str, debug_mode: bool = F
     chat_history = "\n".join(convo_lines)
 
     prompt = PromptTemplate.from_template(
-        """Du bist ein hilfreicher Assistent fuer Dokumentfragen.
-Nutze den Dokumentkontext und den Chatverlauf fuer Follow-up Fragen.
-Wenn die Antwort nicht im Kontext steht, antworte klar, dass sie im Dokument nicht enthalten ist.
+        """You are a helpful assistant for document Q&A.
+Use the document context and chat history to answer follow-up questions.
+Reply strictly in: {response_language}.
+If the answer is not present in the context, clearly say that the information is not in the document.
 
 Chatverlauf:
 {chat_history}
@@ -358,6 +379,7 @@ Antwort:"""
 
     chain = (
         {
+            "response_language": lambda _: response_language_name,
             "chat_history": lambda _: chat_history,
             "context": lambda _: context_text,
             "question": RunnablePassthrough(),
@@ -372,6 +394,7 @@ Antwort:"""
             answer = chain.invoke(user_question)
             sources = format_sources(docs)
             if debug_mode:
+                st.info(f"[DEBUG] Antwortsprache: {response_language_name}")
                 st.info(f"[DEBUG] {len(sources)} Quellen verwendet")
             return answer, sources
         except Exception as exc:
