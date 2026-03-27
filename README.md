@@ -43,7 +43,7 @@ python -m venv .venv
 3. Abhaengigkeiten installieren:
 
 ```bash
-pip install -r requirements_minimal.txt
+pip install -r requirements.txt
 ```
 
 ## API Key konfigurieren
