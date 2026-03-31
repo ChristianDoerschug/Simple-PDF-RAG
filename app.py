@@ -1,6 +1,5 @@
 ﻿import os
 import logging
-import json
 from pathlib import Path
 
 import streamlit as st
@@ -11,7 +10,8 @@ from rag_engine import (
     get_llm_model,
     update_or_load_vector_store,
     infer_response_language,
-    get_rag_chain
+    get_rag_chain,
+    generate_quiz_question
 )
 
 DEFAULT_CHUNK_SIZE = 800
@@ -57,6 +57,12 @@ if "doc_stats" not in st.session_state:
         "file_count": 0,
         "page_count": 0,
     }
+if "learning_mode" not in st.session_state:
+    st.session_state.learning_mode = "Standard Chat"
+if "prev_learning_mode" not in st.session_state:
+    st.session_state.prev_learning_mode = "Standard Chat"
+if "quiz_question_generated" not in st.session_state:
+    st.session_state.quiz_question_generated = False
 
 
 @st.cache_resource
@@ -206,21 +212,6 @@ def format_sources(docs):
     return result
 
 
-def infer_response_language(text: str) -> str:
-    lower = f" {text.lower()} "
-    german_markers = [" der ", " die ", " und ", " ist ",
-                      " nicht ", " ich ", " bitte ", "frage", "dokument"]
-    english_markers = [" the ", " and ", " is ", " not ",
-                       " please ", "question", "document", "what", "how", "can you"]
-
-    german_score = sum(1 for token in german_markers if token in lower)
-    english_score = sum(1 for token in english_markers if token in lower)
-
-    if german_score > english_score:
-        return "de"
-    return "en"
-
-
 def run_rag_pipeline(user_question: str, groq_api_key: str, debug_mode: bool = False):
     response_lang = infer_response_language(user_question)
     response_language_name = "German" if response_lang == "de" else "English"
@@ -322,7 +313,7 @@ def main():
             f"Bitte lade mindestens ein PDF hoch, um das Fach '{course_name}' zu starten.")
         return
 
-    embeddings = get_embeddings_model()
+    embeddings = cached_get_embeddings_model()
 
     try:
         with st.spinner("Index wird geladen / aktualisiert..."):
@@ -364,6 +355,41 @@ def main():
 
     render_metrics(st.session_state.doc_stats)
     st.markdown("### Chat")
+
+    # Wenn Mode auf Quiz gewechselt wurde und noch keine Frage generiert wurde, automatisch eine generieren
+    if st.session_state.learning_mode == "Quiz-Master (Prüfung)" and not st.session_state.quiz_question_generated:
+        try:
+            # Zufällige Chunks aus dem Vector Store für die Frage
+            random_docs = st.session_state.vector_store.similarity_search(
+                "Wichtige Konzepte und Definitionen",
+                k=3
+            )
+            context_for_question = "\n\n".join(
+                [doc.page_content for doc in random_docs])
+
+            with st.spinner("Quiz-Frage wird generiert..."):
+                llm = cached_get_llm_model(
+                    groq_api_key, DEFAULT_MODEL, DEFAULT_TEMPERATURE)
+                quiz_question = generate_quiz_question(
+                    llm, context_for_question, "de")
+
+                # Frage als Assistant-Message hinzufügen
+                st.session_state.chat_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": f"🎯 **Quiz-Frage:** {quiz_question}",
+                        "sources": format_sources(random_docs),
+                    }
+                )
+                # Markiere, dass Frage generiert wurde
+                st.session_state.quiz_question_generated = True
+        except Exception as exc:
+            st.warning(f"Konnte Quiz-Frage nicht generieren: {exc}")
+
+    # Wenn Modus wechselt, Flag zurücksetzen
+    if st.session_state.learning_mode != "Quiz-Master (Prüfung)":
+        st.session_state.quiz_question_generated = False
+
     render_chat()
 
     user_question = st.chat_input("Frage zum Dokumentkontext stellen...")

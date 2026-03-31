@@ -75,12 +75,15 @@ def extract_pdf_chunks(file_name: str, file_bytes: bytes, chunk_size: int, chunk
     }
 
 
-def update_or_load_vector_store(index_root: Path, course_name: str, uploaded_files, embeddings, chunk_size: int, chunk_overlap: int, debug_mode: bool = False, persist_index: bool = True):
-    # Bereinige den Kursnamen für das Dateisystem
+def update_or_load_vector_store(course_name: str, uploaded_files, embeddings, chunk_size: int, chunk_overlap: int, debug_mode: bool = False, persist_index: bool = True):
     safe_course_name = "".join(
         [c for c in course_name if c.isalnum() or c in (' ', '-', '_')]).strip()
     if not safe_course_name:
         safe_course_name = "default_course"
+
+    from pathlib import Path
+    index_root = Path(".indexes")
+    index_root.mkdir(parents=True, exist_ok=True)
 
     index_dir = index_root / safe_course_name
     stats_file = index_dir / "stats.json"
@@ -94,7 +97,6 @@ def update_or_load_vector_store(index_root: Path, course_name: str, uploaded_fil
         "processed_files": []
     }
 
-    # Lade existierenden Index, falls vorhanden
     if persist_index and (index_dir / "index.faiss").exists() and (index_dir / "index.pkl").exists():
         store = FAISS.load_local(
             str(index_dir),
@@ -109,12 +111,10 @@ def update_or_load_vector_store(index_root: Path, course_name: str, uploaded_fil
                 if "processed_files" not in stats:
                     stats["processed_files"] = []
 
-    # Lade nur hochgeladenen Dateien, die wir noch nicht verarbeitet haben
     new_files = [
         f for f in uploaded_files if f.name not in stats["processed_files"]]
 
     if not new_files and store is not None:
-        # Keine neuen Dateien, wir geben den geladenen Store zurück
         return store, safe_course_name, stats, True
 
     all_texts = []
@@ -169,6 +169,37 @@ def infer_response_language(text: str) -> str:
     if german_score > english_score:
         return "de"
     return "en"
+
+
+def generate_quiz_question(llm, context_text: str, response_lang: str = "de"):
+    """Generate a quiz question from the provided context."""
+    response_language_name = "German" if response_lang == "de" else "English"
+
+    prompt = PromptTemplate.from_template(
+        """You are a university professor creating exam questions.
+Based on the provided document context, generate ONE challenging but fair exam question.
+The question should test understanding of key concepts.
+Reply strictly in: {response_language}
+Do not include any preamble, just the question itself.
+
+Kontext:
+{context}
+
+Frage:"""
+    )
+
+    chain = (
+        {
+            "response_language": lambda _: response_language_name,
+            "context": lambda x: x,
+        }
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    question = chain.invoke(context_text)
+    return question.strip()
 
 
 def get_rag_chain(llm, learning_mode: str, response_lang: str):
