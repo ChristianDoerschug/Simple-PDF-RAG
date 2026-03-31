@@ -64,11 +64,24 @@ streamlit run app.py
 
 Standard-URL lokal: `http://localhost:8501`
 
+## Tests
+
+Es gibt eine kleine Unit-Test-Suite für zentrale Kernfunktionen.
+
+Ausführen (im aktivierten venv):
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
 ## Technische Kurzbeschreibung
 
-Die App ist modular aufgebaut, wobei das Frontend (`app.py`) von der Backend-Logik (`rag_engine.py`) getrennt ist.
+Die App ist modular aufgebaut und trennt UI, RAG-Engine, Service-Orchestrierung und Datamodels.
 - **UI:** Streamlit (`app.py`)
-- **Backend/RAG-Controller:** Python (`rag_engine.py`)
+- **RAG-Engine:** Indexing, PDF-Chunking, Prompt-Builder (`rag_engine.py`)
+- **Service-Schicht:** Chatverlauf-Aufbereitung, Quellenformatierung, Pipeline-Orchestrierung (`rag_service.py`)
+- **Datamodels:** Strukturierte Objekte für Stats, Quellen und Pipeline-Ergebnisse (`models.py`)
+- **Tests:** Unit-Tests für Kernlogik (`tests/test_rag_core.py`)
 - **PDF Parsing:** PyPDF2
 - **Chunking:** LangChain `RecursiveCharacterTextSplitter`
 - **Embeddings:** HuggingFace `sentence-transformers/all-MiniLM-L6-v2`
