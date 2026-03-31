@@ -1,8 +1,8 @@
 import io
-import hashlib
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -11,9 +11,32 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 logger = logging.getLogger(__name__)
+INDEX_ROOT = Path(".indexes")
+DEFAULT_COURSE_NAME = "default_course"
+
+
+def sanitize_course_name(course_name: str) -> str:
+    safe_course_name = "".join(
+        [char for char in course_name if char.isalnum() or char in (" ", "-", "_")]
+    ).strip()
+    return safe_course_name or DEFAULT_COURSE_NAME
+
+
+def default_stats() -> dict[str, Any]:
+    return {
+        "word_count": 0,
+        "chunk_count": 0,
+        "file_count": 0,
+        "page_count": 0,
+        "processed_files": [],
+    }
+
+
+def ensure_processed_files(stats: dict[str, Any]) -> None:
+    if "processed_files" not in stats:
+        stats["processed_files"] = []
 
 
 def get_embeddings_model(model_name: str):
@@ -75,47 +98,59 @@ def extract_pdf_chunks(file_name: str, file_bytes: bytes, chunk_size: int, chunk
     }
 
 
-def update_or_load_vector_store(course_name: str, uploaded_files, embeddings, chunk_size: int, chunk_overlap: int, debug_mode: bool = False, persist_index: bool = True):
-    safe_course_name = "".join(
-        [c for c in course_name if c.isalnum() or c in (' ', '-', '_')]).strip()
-    if not safe_course_name:
-        safe_course_name = "default_course"
-
-    from pathlib import Path
-    index_root = Path(".indexes")
-    index_root.mkdir(parents=True, exist_ok=True)
-
-    index_dir = index_root / safe_course_name
+def load_existing_store_and_stats(index_dir: Path, embeddings) -> tuple[Any, dict[str, Any], bool]:
     stats_file = index_dir / "stats.json"
+    stats = default_stats()
+    has_store = (
+        index_dir / "index.faiss").exists() and (index_dir / "index.pkl").exists()
 
+    if not has_store:
+        return None, stats, False
+
+    store = FAISS.load_local(
+        str(index_dir),
+        embeddings,
+        allow_dangerous_deserialization=True,
+    )
+
+    if stats_file.exists():
+        with stats_file.open("r", encoding="utf-8") as fh:
+            loaded_stats = json.load(fh)
+            stats.update(loaded_stats)
+
+    ensure_processed_files(stats)
+    return store, stats, True
+
+
+def update_or_load_vector_store(
+    course_name: str,
+    uploaded_files,
+    embeddings,
+    chunk_size: int,
+    chunk_overlap: int,
+    debug_mode: bool = False,
+    persist_index: bool = True,
+):
+    _ = debug_mode
+    safe_course_name = sanitize_course_name(course_name)
+    INDEX_ROOT.mkdir(parents=True, exist_ok=True)
+
+    index_dir = INDEX_ROOT / safe_course_name
+    stats_file = index_dir / "stats.json"
     store = None
-    stats = {
-        "word_count": 0,
-        "chunk_count": 0,
-        "file_count": 0,
-        "page_count": 0,
-        "processed_files": []
-    }
+    stats = default_stats()
 
-    if persist_index and (index_dir / "index.faiss").exists() and (index_dir / "index.pkl").exists():
-        store = FAISS.load_local(
-            str(index_dir),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-
-        if stats_file.exists():
-            with stats_file.open("r", encoding="utf-8") as fh:
-                loaded_stats = json.load(fh)
-                stats.update(loaded_stats)
-                if "processed_files" not in stats:
-                    stats["processed_files"] = []
+    if persist_index:
+        store, stats, loaded_from_disk = load_existing_store_and_stats(
+            index_dir, embeddings)
+    else:
+        loaded_from_disk = False
 
     new_files = [
-        f for f in uploaded_files if f.name not in stats["processed_files"]]
+        file for file in uploaded_files if file.name not in stats["processed_files"]]
 
     if not new_files and store is not None:
-        return store, safe_course_name, stats, True
+        return store, safe_course_name, stats, loaded_from_disk
 
     all_texts = []
     all_metas = []
@@ -136,7 +171,8 @@ def update_or_load_vector_store(course_name: str, uploaded_files, embeddings, ch
 
     if not all_texts and store is None:
         raise ValueError(
-            "Keine neuen Chunks erstellt und kein existierender Index gefunden. Bitte lade eine gültige PDF-Datei hoch.")
+            "Keine neuen Chunks erstellt und kein existierender Index gefunden. Bitte lade eine gültige PDF-Datei hoch."
+        )
 
     if all_texts:
         if store is None:
