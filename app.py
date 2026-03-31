@@ -1,20 +1,18 @@
-﻿import io
-import os
+﻿import os
 import logging
-import hashlib
 import json
 from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
-from PyPDF2 import PdfReader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+
+from rag_engine import (
+    get_embeddings_model,
+    get_llm_model,
+    update_or_load_vector_store,
+    infer_response_language,
+    get_rag_chain
+)
 
 DEFAULT_CHUNK_SIZE = 800
 DEFAULT_CHUNK_OVERLAP = 150
@@ -62,153 +60,45 @@ if "doc_stats" not in st.session_state:
 
 
 @st.cache_resource
-def get_embeddings_model(model_name: str = EMBEDDING_MODEL):
-    logger.info("Loading embeddings model: %s", model_name)
-    return HuggingFaceEmbeddings(model_name=model_name)
+def cached_get_embeddings_model(model_name: str = EMBEDDING_MODEL):
+    return get_embeddings_model(model_name)
 
 
 @st.cache_resource
-def get_llm_model(
+def cached_get_llm_model(
     api_key: str,
     model_name: str = DEFAULT_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
 ):
-    logger.info("Loading LLM model: %s", model_name)
-    return ChatGroq(
-        temperature=temperature,
-        groq_api_key=api_key,
-        model_name=model_name,
-    )
-
-
-@st.cache_data
-def extract_pdf_chunks(file_name: str, file_bytes: bytes, chunk_size: int, chunk_overlap: int):
-    reader = PdfReader(io.BytesIO(file_bytes))
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        length_function=len,
-    )
-
-    texts = []
-    metadatas = []
-    word_count = 0
-
-    for page_idx, page in enumerate(reader.pages, start=1):
-        raw_text = page.extract_text() or ""
-        cleaned = raw_text.strip()
-        if not cleaned:
-            continue
-
-        word_count += len(cleaned.split())
-        page_chunks = splitter.split_text(cleaned)
-
-        for chunk_idx, chunk in enumerate(page_chunks, start=1):
-            value = chunk.strip()
-            if not value:
-                continue
-            texts.append(value)
-            metadatas.append(
-                {
-                    "source": file_name,
-                    "page": page_idx,
-                    "chunk": chunk_idx,
-                }
-            )
-
-    if not texts:
-        raise ValueError(f"{file_name}: kein lesbarer Text gefunden")
-
-    return {
-        "texts": texts,
-        "metadatas": metadatas,
-        "word_count": word_count,
-        "page_count": len(reader.pages),
-    }
-
-
-def build_index_key(uploaded_files, chunk_size: int, chunk_overlap: int) -> str:
-    payload_parts = [f"chunk={chunk_size}",
-                     f"overlap={chunk_overlap}", f"embed={EMBEDDING_MODEL}"]
-    for f in sorted(uploaded_files, key=lambda x: x.name.lower()):
-        payload_parts.append(f"{f.name}:{f.size}")
-    payload = "|".join(payload_parts)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-
-def load_or_build_vector_store(uploaded_files, embeddings, chunk_size: int, chunk_overlap: int, debug_mode: bool = False, persist_index: bool = True):
-    index_key = build_index_key(uploaded_files, chunk_size, chunk_overlap)
-    index_dir = INDEX_ROOT / index_key
-    stats_file = index_dir / "stats.json"
-
-    if persist_index and (index_dir / "index.faiss").exists() and (index_dir / "index.pkl").exists():
-        store = FAISS.load_local(
-            str(index_dir),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-        if debug_mode:
-            st.info(f"[DEBUG] Index aus Datei geladen: {index_dir}")
-
-        if stats_file.exists():
-            with stats_file.open("r", encoding="utf-8") as fh:
-                stats = json.load(fh)
-        else:
-            stats = {
-                "word_count": 0,
-                "chunk_count": len(store.docstore._dict),
-                "file_count": len(uploaded_files),
-                "page_count": 0,
-            }
-
-        return store, index_key, stats, True
-
-    all_texts = []
-    all_metas = []
-    total_words = 0
-    total_pages = 0
-
-    for uploaded_file in uploaded_files:
-        pdf_data = extract_pdf_chunks(
-            uploaded_file.name,
-            uploaded_file.getvalue(),
-            chunk_size,
-            chunk_overlap,
-        )
-        all_texts.extend(pdf_data["texts"])
-        all_metas.extend(pdf_data["metadatas"])
-        total_words += pdf_data["word_count"]
-        total_pages += pdf_data["page_count"]
-
-    if not all_texts:
-        raise ValueError(
-            "Keine Chunks erstellt. Bitte andere PDF-Dateien verwenden.")
-
-    store = FAISS.from_texts(all_texts, embeddings, metadatas=all_metas)
-    if persist_index:
-        index_dir.mkdir(parents=True, exist_ok=True)
-        store.save_local(str(index_dir))
-
-    if debug_mode:
-        st.info(f"[DEBUG] Neuer Index gespeichert: {index_dir}")
-
-    stats = {
-        "word_count": total_words,
-        "chunk_count": len(all_texts),
-        "file_count": len(uploaded_files),
-        "page_count": total_pages,
-    }
-
-    if persist_index:
-        with stats_file.open("w", encoding="utf-8") as fh:
-            json.dump(stats, fh)
-
-    return store, index_key, stats, False
+    return get_llm_model(api_key, model_name, temperature)
 
 
 def render_sidebar():
     with st.sidebar:
         st.title("Konfiguration")
+
+        st.subheader("Kurs-Verwaltung")
+        existing_courses = [d.name for d in INDEX_ROOT.iterdir() if d.is_dir()]
+        course_options = ["-- Neuer Kurs --"] + existing_courses
+        selected_course = st.selectbox(
+            "Lernfach / Kurs wählen", course_options)
+
+        if selected_course == "-- Neuer Kurs --":
+            course_name = st.text_input("Neuer Kursname:", "Mein Kurs")
+        else:
+            course_name = selected_course
+
+        st.divider()
+
+        st.subheader("Lern-Modus")
+        st.session_state.learning_mode = st.radio(
+            "Wähle deinen Modus aus:",
+            ["Standard Chat",
+                "Quiz-Master (Prüfung)", "Sokratisch (Erklären)"],
+            help="Bestimmt, wie die KI auf deine Eingaben reagiert."
+        )
+
+        st.divider()
 
         st.subheader("API Keys")
         env_groq_api_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -279,7 +169,7 @@ def render_sidebar():
             ]
             st.rerun()
 
-        return groq_api_key, st.session_state.persist_index
+        return course_name, groq_api_key, st.session_state.persist_index
 
 
 def render_metrics(stats: dict):
@@ -292,18 +182,27 @@ def render_metrics(stats: dict):
 
 def format_sources(docs):
     result = []
-    for idx, doc in enumerate(docs, start=1):
+    # Dedupliziere Quellen nach Seite und Dokument, um übersichtlicher zu bleiben
+    seen = set()
+    for doc in docs:
         meta = doc.metadata or {}
         source = meta.get("source", "unbekannt")
         page = meta.get("page", "?")
-        chunk = meta.get("chunk", "?")
-        snippet = " ".join(doc.page_content.split())
-        result.append(
-            {
-                "label": f"[{idx}] {source} - Seite {page}, Chunk {chunk}",
-                "snippet": snippet[:280] + ("..." if len(snippet) > 280 else ""),
-            }
-        )
+
+        # Einzigartige ID für die Quelle
+        doc_id = f"{source}_page_{page}"
+
+        if doc_id not in seen:
+            seen.add(doc_id)
+            snippet = " ".join(doc.page_content.split())
+            # Kürzerer Anzeigename
+            short_source = source.replace(".pdf", "")
+            result.append(
+                {
+                    "label": f"📄 {short_source} – Folie {page}",
+                    "snippet": snippet[:280] + ("..." if len(snippet) > 280 else ""),
+                }
+            )
     return result
 
 
@@ -357,41 +256,19 @@ def run_rag_pipeline(user_question: str, groq_api_key: str, debug_mode: bool = F
             convo_lines.append(f"Assistant: {content}")
     chat_history = "\n".join(convo_lines)
 
-    prompt = PromptTemplate.from_template(
-        """You are a helpful assistant for document Q&A.
-Use the document context and chat history to answer follow-up questions.
-Reply strictly in: {response_language}.
-If the answer is not present in the context, clearly say that the information is not in the document.
+    learning_mode = st.session_state.get("learning_mode", "Standard Chat")
 
-Chatverlauf:
-{chat_history}
-
-Kontext:
-{context}
-
-Frage:
-{question}
-
-Antwort:"""
-    )
+    chain = get_rag_chain(llm, learning_mode, response_lang)
 
     context_text = "\n\n".join([doc.page_content for doc in docs])
 
-    chain = (
-        {
-            "response_language": lambda _: response_language_name,
-            "chat_history": lambda _: chat_history,
-            "context": lambda _: context_text,
-            "question": RunnablePassthrough(),
-        }
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
     with st.spinner("Antwort wird generiert..."):
         try:
-            answer = chain.invoke(user_question)
+            answer = chain.invoke({
+                "chat_history": chat_history,
+                "context": context_text,
+                "question": user_question
+            })
             sources = format_sources(docs)
             if debug_mode:
                 st.info(f"[DEBUG] Antwortsprache: {response_language_name}")
@@ -408,39 +285,49 @@ def render_chat():
             st.markdown(msg["content"])
             sources = msg.get("sources", [])
             if sources:
-                with st.expander("Quellen"):
+                with st.expander("Gefundene Quellen (Folien)"):
                     for src in sources:
                         st.markdown(f"- **{src['label']}**")
-                        st.caption(src["snippet"])
+                        st.caption(f"_{src['snippet']}_")
 
 
 def main():
-    st.title("Simple PDF RAG Assistant")
-    st.write("Mehrere PDFs, persistenter Index, Follow-up Fragen und Quellenanzeige.")
+    st.title("Lern-RAG für Vorlesungen")
+    st.write("Persistente Wissensdatenbank nach Fächern / Kursen.")
     st.divider()
 
-    groq_api_key, persist_index = render_sidebar()
+    course_name, groq_api_key, persist_index = render_sidebar()
 
     if not groq_api_key:
         st.warning(
             "Kein API Key gefunden. Lege GROQ_API_KEY in .env ab oder gib ihn links ein.")
         return
 
+    st.subheader(f"Aktuelles Fach: {course_name}")
+
     uploaded_files = st.file_uploader(
-        "Lade eine oder mehrere PDFs hoch",
+        f"Lade neue PDF-Folien für '{course_name}' hoch (optional)",
         type="pdf",
         accept_multiple_files=True,
     )
 
-    if not uploaded_files:
-        st.info("Bitte mindestens ein PDF hochladen.")
+    safe_course_name = "".join(
+        [c for c in course_name if c.isalnum() or c in (' ', '-', '_')]).strip()
+    if not safe_course_name:
+        safe_course_name = "default_course"
+    has_index = (INDEX_ROOT / safe_course_name / "index.faiss").exists()
+
+    if not uploaded_files and not has_index:
+        st.info(
+            f"Bitte lade mindestens ein PDF hoch, um das Fach '{course_name}' zu starten.")
         return
 
     embeddings = get_embeddings_model()
 
     try:
-        with st.spinner("Index wird vorbereitet..."):
-            vector_store, index_key, stats, loaded_from_disk = load_or_build_vector_store(
+        with st.spinner("Index wird geladen / aktualisiert..."):
+            vector_store, course_idx_key, stats, loaded_from_disk = update_or_load_vector_store(
+                course_name,
                 uploaded_files,
                 embeddings,
                 st.session_state.chunk_size,
@@ -452,28 +339,28 @@ def main():
         st.error(f"Fehler beim Erstellen/Laden des Index: {exc}")
         return
 
-    if st.session_state.index_key != index_key:
-        file_names = ", ".join([f.name for f in uploaded_files])
+    if st.session_state.index_key != course_idx_key:
+        # Chat zurücksetzen, wenn das Fach gewechselt wird
         st.session_state.chat_messages = [
             {
                 "role": "assistant",
-                "content": f"Index bereit fuer: {file_names}",
+                "content": f"Wissensdatenbank für '{course_name}' geladen. Was möchtest du lernen?",
                 "sources": [],
             }
         ]
 
     st.session_state.vector_store = vector_store
-    st.session_state.index_key = index_key
+    st.session_state.index_key = course_idx_key
     st.session_state.doc_stats = stats
 
     if loaded_from_disk:
-        st.caption("Index aus lokaler Speicherung geladen.")
-    else:
-        if persist_index:
-            st.caption("Index neu erstellt und lokal gespeichert.")
-        else:
+        if uploaded_files:
             st.caption(
-                "Index neu erstellt (nur im Speicher, nicht lokal gespeichert).")
+                "Index existierte, aber keine neuen/unbekannten Dateien gefunden.")
+        else:
+            st.caption("Index aus lokaler Speicherung geladen.")
+    else:
+        st.caption("Index wurde mit neuen Dateien aktualisiert.")
 
     render_metrics(st.session_state.doc_stats)
     st.markdown("### Chat")
