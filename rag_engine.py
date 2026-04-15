@@ -1,10 +1,12 @@
 import io
+import importlib
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
-from PyPDF2 import PdfReader
+from docling.datamodel.base_models import DocumentStream
+from docling.document_converter import DocumentConverter
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -53,48 +55,67 @@ def get_llm_model(api_key: str, model_name: str, temperature: float):
     )
 
 
-def extract_pdf_chunks(file_name: str, file_bytes: bytes, chunk_size: int, chunk_overlap: int):
-    reader = PdfReader(io.BytesIO(file_bytes))
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        length_function=len,
-    )
+def extract_pdf_chunks(file_name: str, file_bytes: bytes, chunk_size: int, chunk_overlap: int, embeddings=None):
+    converter = DocumentConverter()
+
+    source_stream = DocumentStream(
+        name=file_name, stream=io.BytesIO(file_bytes))
+    doc = converter.convert(source_stream)
+    extracted_text = doc.document.export_to_markdown()
+
+    if not extracted_text.strip():
+        raise ValueError(f"{file_name}: kein lesbarer Text gefunden")
+
+    if embeddings is None:
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+    try:
+        semantic_chunker_cls = importlib.import_module(
+            "langchain_experimental.text_splitter"
+        ).SemanticChunker
+        splitter = semantic_chunker_cls(
+            embeddings=embeddings,
+            breakpoint_threshold_type="percentile",
+            breakpoint_threshold_amount=95,
+        )
+        chunks = splitter.split_text(extracted_text)
+    except ImportError:
+        fallback_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=800,
+            chunk_overlap=150,
+            length_function=len,
+        )
+        chunks = fallback_splitter.split_text(extracted_text)
 
     texts = []
     metadatas = []
-    word_count = 0
+    word_count = len(extracted_text.split())
 
-    for page_idx, page in enumerate(reader.pages, start=1):
-        raw_text = page.extract_text() or ""
-        cleaned = raw_text.strip()
-        if not cleaned:
+    for chunk_idx, chunk in enumerate(chunks, start=1):
+        value = chunk.strip()
+        if not value:
             continue
-
-        word_count += len(cleaned.split())
-        page_chunks = splitter.split_text(cleaned)
-
-        for chunk_idx, chunk in enumerate(page_chunks, start=1):
-            value = chunk.strip()
-            if not value:
-                continue
-            texts.append(value)
-            metadatas.append(
-                {
-                    "source": file_name,
-                    "page": page_idx,
-                    "chunk": chunk_idx,
-                }
-            )
+        texts.append(value)
+        metadatas.append(
+            {
+                "source": file_name,
+                "page": 1,
+                "chunk": chunk_idx,
+            }
+        )
 
     if not texts:
-        raise ValueError(f"{file_name}: kein lesbarer Text gefunden")
+        raise ValueError(
+            f"{file_name}: kein lesbarer Text nach Chunking gefunden")
+
+    page_count = len(doc.pages) if doc.pages else 1
 
     return {
         "texts": texts,
         "metadatas": metadatas,
         "word_count": word_count,
-        "page_count": len(reader.pages),
+        "page_count": page_count,
     }
 
 
@@ -161,6 +182,7 @@ def update_or_load_vector_store(
             uploaded_file.getvalue(),
             chunk_size,
             chunk_overlap,
+            embeddings=embeddings,
         )
         all_texts.extend(pdf_data["texts"])
         all_metas.extend(pdf_data["metadatas"])
