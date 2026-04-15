@@ -1,7 +1,11 @@
 import unittest
 
 from models import DocumentStats
-from rag_engine import infer_response_language, sanitize_course_name
+from rag_engine import (
+    chunk_texts_with_page_metadata,
+    infer_response_language,
+    sanitize_course_name,
+)
 from rag_service import build_chat_history, format_sources
 
 
@@ -51,6 +55,26 @@ class RagCoreTests(unittest.TestCase):
         }
         stats = DocumentStats.from_mapping(payload)
         self.assertEqual(stats.to_mapping(), payload)
+
+    def test_chunk_texts_with_page_metadata_preserves_page_numbers(self):
+        class FakeSplitter:
+            def split_text(self, text: str):
+                mapping = {
+                    "Seite 1": ["Chunk 1A", "Chunk 1B"],
+                    "Seite 2": ["Chunk 2A"],
+                }
+                return mapping.get(text, [])
+
+        page_texts = [(1, "Seite 1"), (2, "Seite 2")]
+        texts, metadatas = chunk_texts_with_page_metadata(
+            page_texts=page_texts,
+            splitter=FakeSplitter(),
+            file_name="Skript.pdf",
+        )
+
+        self.assertEqual(texts, ["Chunk 1A", "Chunk 1B", "Chunk 2A"])
+        self.assertEqual([m["page"] for m in metadatas], [1, 1, 2])
+        self.assertEqual([m["chunk"] for m in metadatas], [1, 2, 3])
 
 
 if __name__ == "__main__":

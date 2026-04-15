@@ -4,7 +4,7 @@ from models import RagPipelineResult, SourceReference
 from rag_engine import generate_quiz_question, get_rag_chain, infer_response_language
 
 
-def build_chat_history(messages: list[dict[str, Any]], max_messages: int = 8) -> str:
+def build_chat_history(messages: list[dict[str, Any]], max_messages: int = 3) -> str:
     recent_messages = messages[-max_messages:]
     convo_lines: list[str] = []
     for message in recent_messages:
@@ -75,7 +75,13 @@ def run_rag_pipeline(
     llm = get_llm_model_fn(groq_api_key, model_name, temperature)
     chat_history = build_chat_history(chat_messages)
     chain = get_rag_chain(llm, learning_mode, response_lang)
-    context_text = "\n\n".join([doc.page_content for doc in docs])
+    # Limit context length to prevent token limit errors
+    context_parts = []
+    for doc in docs:
+        truncated = doc.page_content[:1000] if len(
+            doc.page_content) > 1000 else doc.page_content
+        context_parts.append(truncated)
+    context_text = "\n\n".join(context_parts)
 
     answer = chain.invoke(
         {

@@ -5,8 +5,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from docling.datamodel.base_models import DocumentStream
-from docling.document_converter import DocumentConverter
+from docling.datamodel.base_models import DocumentStream, InputFormat
+from docling.datamodel.pipeline_options import EasyOcrOptions, PdfPipelineOptions, RapidOcrOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -55,13 +56,95 @@ def get_llm_model(api_key: str, model_name: str, temperature: float):
     )
 
 
-def extract_pdf_chunks(file_name: str, file_bytes: bytes, chunk_size: int, chunk_overlap: int, embeddings=None):
-    converter = DocumentConverter()
+def get_docling_converter(ocr_engine: str) -> DocumentConverter:
+    selected_engine = (ocr_engine or "easyocr").strip().lower()
+    if selected_engine == "rapidocr":
+        ocr_options = RapidOcrOptions()
+    else:
+        ocr_options = EasyOcrOptions()
+
+    pdf_options = PdfPipelineOptions(
+        do_ocr=True,
+        ocr_options=ocr_options,
+    )
+
+    return DocumentConverter(
+        allowed_formats=[InputFormat.PDF],
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),
+        },
+    )
+
+
+def extract_page_texts(doc_result) -> list[tuple[int, str]]:
+    """Extract markdown text per page from a Docling conversion result."""
+    page_texts: list[tuple[int, str]] = []
+
+    try:
+        generate_pages = importlib.import_module(
+            "docling.utils.export").generate_multimodal_pages
+        for content_text, content_md, _, _, _, page in generate_pages(doc_result):
+            text = (content_text or "").strip() or (content_md or "").strip()
+            if not text:
+                continue
+
+            page_no = getattr(page, "page_no", None)
+            if isinstance(page_no, int) and page_no > 0:
+                page_texts.append((page_no, text))
+    except (ImportError, AttributeError, RuntimeError, ValueError, TypeError) as exc:
+        logger.warning("Falling back to full-document extraction: %s", exc)
+
+    if page_texts:
+        return page_texts
+
+    fallback_text = doc_result.document.export_to_markdown()
+    if fallback_text.strip():
+        return [(1, fallback_text)]
+
+    return []
+
+
+def chunk_texts_with_page_metadata(
+    page_texts: list[tuple[int, str]],
+    splitter,
+    file_name: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    texts: list[str] = []
+    metadatas: list[dict[str, Any]] = []
+    chunk_idx = 1
+
+    for page_no, page_text in page_texts:
+        for chunk in splitter.split_text(page_text):
+            value = chunk.strip()
+            if not value:
+                continue
+
+            texts.append(value)
+            metadatas.append(
+                {
+                    "source": file_name,
+                    "page": page_no,
+                    "chunk": chunk_idx,
+                }
+            )
+            chunk_idx += 1
+
+    return texts, metadatas
+
+
+def extract_pdf_chunks(
+    file_name: str,
+    file_bytes: bytes,
+    embeddings=None,
+    ocr_engine: str = "easyocr",
+):
+    converter = get_docling_converter(ocr_engine)
 
     source_stream = DocumentStream(
         name=file_name, stream=io.BytesIO(file_bytes))
     doc = converter.convert(source_stream)
-    extracted_text = doc.document.export_to_markdown()
+    page_texts = extract_page_texts(doc)
+    extracted_text = "\n\n".join(text for _, text in page_texts)
 
     if not extracted_text.strip():
         raise ValueError(f"{file_name}: kein lesbarer Text gefunden")
@@ -81,29 +164,20 @@ def extract_pdf_chunks(file_name: str, file_bytes: bytes, chunk_size: int, chunk
         )
         chunks = splitter.split_text(extracted_text)
     except ImportError:
+        # Fallback: use fixed defaults if SemanticChunker not available
         fallback_splitter = RecursiveCharacterTextSplitter(
             chunk_size=800,
             chunk_overlap=150,
             length_function=len,
         )
-        chunks = fallback_splitter.split_text(extracted_text)
+        splitter = fallback_splitter
 
-    texts = []
-    metadatas = []
+    texts, metadatas = chunk_texts_with_page_metadata(
+        page_texts=page_texts,
+        splitter=splitter,
+        file_name=file_name,
+    )
     word_count = len(extracted_text.split())
-
-    for chunk_idx, chunk in enumerate(chunks, start=1):
-        value = chunk.strip()
-        if not value:
-            continue
-        texts.append(value)
-        metadatas.append(
-            {
-                "source": file_name,
-                "page": 1,
-                "chunk": chunk_idx,
-            }
-        )
 
     if not texts:
         raise ValueError(
@@ -147,8 +221,7 @@ def update_or_load_vector_store(
     course_name: str,
     uploaded_files,
     embeddings,
-    chunk_size: int,
-    chunk_overlap: int,
+    ocr_engine: str = "easyocr",
     debug_mode: bool = False,
     persist_index: bool = True,
 ):
@@ -180,9 +253,8 @@ def update_or_load_vector_store(
         pdf_data = extract_pdf_chunks(
             uploaded_file.name,
             uploaded_file.getvalue(),
-            chunk_size,
-            chunk_overlap,
             embeddings=embeddings,
+            ocr_engine=ocr_engine,
         )
         all_texts.extend(pdf_data["texts"])
         all_metas.extend(pdf_data["metadatas"])

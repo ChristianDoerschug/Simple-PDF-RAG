@@ -15,11 +15,10 @@ from rag_engine import (
 )
 from rag_service import generate_quiz_from_vector_store, run_rag_pipeline as run_rag_pipeline_service
 
-DEFAULT_CHUNK_SIZE = 800
-DEFAULT_CHUNK_OVERLAP = 150
+DEFAULT_OCR_ENGINE = "easyocr"
 DEFAULT_TEMPERATURE = 0.1
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
-DEFAULT_K_RETRIEVAL = 4
+DEFAULT_MODEL = "openai/gpt-oss-120b"
+DEFAULT_K_RETRIEVAL = 2
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 INDEX_ROOT = Path(".indexes")
 DEFAULT_LEARNING_MODE = "Standard Chat"
@@ -34,7 +33,7 @@ load_dotenv()
 INDEX_ROOT.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(
-    page_title="Simple PDF RAG Assistant",
+    page_title="Multi Input RAG Assistant",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -59,8 +58,7 @@ def init_session_state() -> None:
         "learning_mode": DEFAULT_LEARNING_MODE,
         "prev_learning_mode": DEFAULT_LEARNING_MODE,
         "quiz_question_generated": False,
-        "chunk_size": DEFAULT_CHUNK_SIZE,
-        "chunk_overlap": DEFAULT_CHUNK_OVERLAP,
+        "ocr_engine": DEFAULT_OCR_ENGINE,
         "k_retrieval": DEFAULT_K_RETRIEVAL,
         "temperature": DEFAULT_TEMPERATURE,
     }
@@ -134,25 +132,18 @@ def render_sidebar() -> tuple[str, str, bool]:
         st.divider()
 
         st.subheader("RAG Parameter")
-        st.session_state.chunk_size = st.slider(
-            "Chunk Size",
-            min_value=200,
-            max_value=2000,
-            value=DEFAULT_CHUNK_SIZE,
-            step=100,
-        )
-        st.session_state.chunk_overlap = st.slider(
-            "Chunk Overlap",
-            min_value=0,
-            max_value=500,
-            value=DEFAULT_CHUNK_OVERLAP,
-            step=50,
+        st.session_state.ocr_engine = st.selectbox(
+            "OCR Engine",
+            options=["easyocr", "rapidocr"],
+            index=0 if st.session_state.ocr_engine == "easyocr" else 1,
+            help="EasyOCR ist meist robuster, RapidOCR oft schneller auf CPU.",
         )
         st.session_state.k_retrieval = st.slider(
             "Retrieved Documents (k)",
             min_value=1,
-            max_value=10,
+            max_value=5,
             value=DEFAULT_K_RETRIEVAL,
+            help="Weniger Dokumente = weniger Tokens, schneller. Max 5 um Rate-Limit zu vermeiden.",
         )
 
         st.divider()
@@ -264,8 +255,7 @@ def main() -> None:
                 course_name,
                 uploaded_files,
                 embeddings,
-                st.session_state.chunk_size,
-                st.session_state.chunk_overlap,
+                st.session_state.ocr_engine,
                 st.session_state.debug_mode,
                 persist_index,
             )
